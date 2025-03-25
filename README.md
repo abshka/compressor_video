@@ -19,8 +19,8 @@ GUI-приложение для сжатия видео без потери ка
 
 1. Клонируйте репозиторий:
    ```
-   git clone https://github.com/username/compressor-video.git
-   cd compressor-video
+   git clone https://github.com/abshka/compressor_video.git
+   cd compressor_video
    ```
 
 2. Создайте виртуальное окружение:
