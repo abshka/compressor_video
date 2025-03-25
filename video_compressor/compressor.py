@@ -2,6 +2,7 @@ import os
 import subprocess
 import re
 import time
+import signal
 from typing import Callable, Optional
 
 
@@ -44,73 +45,87 @@ class VideoCompressor:
         if not os.path.exists(input_file):
             raise FileNotFoundError(f"Входной файл не найден: {input_file}")
 
-        # Проверка и добавление расширения выходного файла, если отсутствует
-        _, ext = os.path.splitext(output_file)
-        if not ext:
-            if codec in ["h264", "h265"]:
-                output_file += ".mp4"
-            elif codec == "vp9":
-                output_file += ".webm"
-            elif codec == "av1":
-                output_file += ".mkv"
-            else:
-                output_file += ".mp4"
+        # Буферизация вывода для улучшения производительности
+        process = None
+        try:
+            command = self._prepare_command(input_file, output_file, codec, crf, hardware_acceleration)
 
-        duration = self._get_video_duration(input_file)
-        if duration <= 0:
-            raise ValueError(f"Не удалось определить продолжительность видео: {input_file}")
+            # Запускаем процесс с правильной настройкой буферов и потоков
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                text=True,
+                bufsize=1  # Построчная буферизация для более стабильной работы
+            )
 
+            duration = self._get_video_duration(input_file)
+
+            if process.returncode is None:  # Проверяем, что процесс еще запущен
+                if progress_callback:
+                    self._monitor_progress(process, duration, progress_callback)
+                else:
+                    stdout, stderr = process.communicate()  # Ожидаем завершения и читаем все потоки
+
+            if process and process.returncode != 0:
+                stderr_output = process.stderr.read() if process and process.stderr else "Неизвестная ошибка"
+                raise RuntimeError(f"Ошибка FFmpeg: {stderr_output}")
+
+        except Exception as e:
+            if process:
+                # Корректное завершение процесса ffmpeg
+                process.terminate()
+                try:
+                    process.wait(timeout=5)  # Ждем 5 секунд
+                except subprocess.TimeoutExpired:
+                    process.kill()  # Принудительное завершение
+                    process.wait()
+            raise e
+
+    def _prepare_command(self, input_file, output_file, codec, crf, hardware_acceleration):
+        """Подготовка команды ffmpeg с оптимизированными параметрами"""
         command = ["ffmpeg", "-i", input_file]
 
-        if hardware_acceleration:
-            if hardware_acceleration == "nvidia":
-                if codec == "h264":
-                    command.extend(["-c:v", "h264_nvenc", "-preset", "slow"])
-                elif codec == "h265":
-                    command.extend(["-c:v", "hevc_nvenc", "-preset", "slow"])
-                else:
-                    command.extend(self._get_software_codec_args(codec, crf))
-            elif hardware_acceleration == "amd":
-                if codec == "h264":
-                    command.extend(["-c:v", "h264_amf"])
-                elif codec == "h265":
-                    command.extend(["-c:v", "hevc_amf"])
-                else:
-                    command.extend(self._get_software_codec_args(codec, crf))
-            elif hardware_acceleration == "intel":
-                if codec == "h264":
-                    command.extend(["-c:v", "h264_qsv"])
-                elif codec == "h265":
-                    command.extend(["-c:v", "hevc_qsv"])
-                else:
-                    command.extend(self._get_software_codec_args(codec, crf))
+        # Добавляем оптимизированные параметры буферизации
+        command.extend(["-thread_queue_size", "4096"])
 
-            if codec in ["h264", "h265"]:
-                command.extend(["-crf", str(crf)])
+        if hardware_acceleration:
+            command.extend(self._get_hw_accel_args(codec, crf, hardware_acceleration))
         else:
             command.extend(self._get_software_codec_args(codec, crf))
 
-        command.extend(["-c:a", "copy"])
-        command.extend(["-progress", "-", "-nostats"])
-        command.extend(["-y", output_file])
+        command.extend([
+            "-c:a", "copy",
+            "-progress", "-",
+            "-nostats",
+            "-y",
+            output_file
+        ])
+        return command
 
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            text=True,
-            bufsize=1
-        )
+    def _get_hw_accel_args(self, codec, crf, hardware_acceleration):
+        """Получение оптимизированных параметров для аппаратного ускорения"""
+        args = []
+        if hardware_acceleration == "nvidia":
+            if codec == "h264":
+                args.extend(["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq"])
+            elif codec == "h265":
+                args.extend(["-c:v", "hevc_nvenc", "-preset", "p4", "-tune", "hq"])
+        elif hardware_acceleration == "amd":
+            if codec == "h264":
+                args.extend(["-c:v", "h264_amf", "-quality", "quality"])
+            elif codec == "h265":
+                args.extend(["-c:v", "hevc_amf", "-quality", "quality"])
+        elif hardware_acceleration == "intel":
+            if codec == "h264":
+                args.extend(["-c:v", "h264_qsv", "-preset", "slower"])
+            elif codec == "h265":
+                args.extend(["-c:v", "hevc_qsv", "-preset", "slower"])
 
-        if progress_callback:
-            self._monitor_progress(process, duration, progress_callback)
-        else:
-            process.wait()
-
-        if process.returncode != 0:
-            stderr = process.stderr.read() if hasattr(process.stderr, 'read') else "Неизвестная ошибка"
-            raise RuntimeError(f"Ошибка FFmpeg: {stderr}")
+        if codec in ["h264", "h265"]:
+            args.extend(["-crf", str(crf)])
+        return args
 
     def _get_software_codec_args(self, codec: str, crf: int) -> list:
         """Возвращает аргументы для программного кодека"""
@@ -147,24 +162,50 @@ class VideoCompressor:
             total_duration: float,
             progress_callback: Callable[[int], None]
     ) -> None:
-        """Мониторит прогресс FFmpeg"""
+        """Оптимизированный мониторинг прогресса FFmpeg"""
         time_pattern = re.compile(r"out_time_ms=(\d+)")
-        last_update = 0
+        last_progress = -1
+        last_update_time = 0
+        update_interval = 0.5  # Интервал обновления в секундах
 
-        for line in process.stdout:
-            match = time_pattern.search(line)
-            if match:
-                current_ms = int(match.group(1))
-                current_secs = current_ms / 1000000
-                progress = min(100, int((current_secs / total_duration) * 100))
-                current_time = time.time()
-                if progress != last_update and current_time - last_update > 0.5:
-                    progress_callback(progress)
-                    last_update = current_time
+        # Используем безопасное чтение с обработкой закрытых потоков
+        try:
+            while process.poll() is None:
+                try:
+                    line = process.stdout.readline()
+                    if not line:
+                        time.sleep(0.1)  # Небольшая задержка, чтобы не загружать CPU
+                        continue
 
-        process.wait()
-        if process.returncode == 0:
-            progress_callback(100)
+                    match = time_pattern.search(line)
+                    if match:
+                        current_ms = int(match.group(1))
+                        current_secs = current_ms / 1000000
+                        progress = min(100, int((current_secs / total_duration) * 100))
+
+                        current_time = time.time()
+                        if (progress != last_progress and
+                                current_time - last_update_time >= update_interval):
+                            progress_callback(progress)
+                            last_progress = progress
+                            last_update_time = current_time
+                except (ValueError, IOError, BrokenPipeError):
+                    # Обработка возможных исключений при чтении потока
+                    break
+
+            # Собираем оставшийся вывод, чтобы избе��ать блокировки буферов
+            try:
+                process.communicate()
+            except Exception:
+                pass
+
+            # Завершающее обновление прогресса
+            if process.returncode == 0:
+                progress_callback(100)
+
+        except Exception as e:
+            # Перехватываем любые исключения при мониторинге, чтобы не крашить программу
+            print(f"Ошибка при мониторинге прогресса: {e}")
 
     def estimate_output_size(self, input_file: str, codec: str, crf: int) -> float:
         """Оценивает размер выходного файла в МБ"""

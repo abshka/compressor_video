@@ -1,10 +1,13 @@
 import os
+import subprocess
 import time
+import signal
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QPushButton,
                              QHBoxLayout, QLabel, QFileDialog, QComboBox,
                              QSlider, QProgressBar, QMessageBox, QGroupBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from video_compressor.compressor import VideoCompressor
+
 
 # Поток для сжатия одного файла
 class CompressionThread(QThread):
@@ -19,6 +22,7 @@ class CompressionThread(QThread):
         self.crf = crf
         self.hw_accel = hw_accel
         self.compressor = VideoCompressor()
+        self.process = None
 
     def run(self):
         try:
@@ -33,16 +37,37 @@ class CompressionThread(QThread):
                 self.progress_update.emit
             )
             elapsed_time = time.time() - start_time
-            output_size_mb = os.path.getsize(self.output_file) / (1024 * 1024) if os.path.exists(self.output_file) else 0
-            self.compression_finished.emit(True, "Сжатие видео успешно завершено", elapsed_time, input_size_mb, output_size_mb)
+            output_size_mb = os.path.getsize(self.output_file) / (1024 * 1024) if os.path.exists(
+                self.output_file) else 0
+            self.compression_finished.emit(True, "Сжатие видео успешно завершено", elapsed_time, input_size_mb,
+                                           output_size_mb)
         except Exception as e:
             elapsed_time = time.time() - start_time if 'start_time' in locals() else 0
             self.compression_finished.emit(False, f"Ошибка при сжатии видео: {str(e)}", elapsed_time, 0, 0)
+        finally:
+            if self.process and self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+
+    def stop(self):
+        """Безопасная остановка процесса сжатия"""
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        self.wait()
+
 
 # Поток для сжатия папки
 class FolderCompressionThread(QThread):
-    progress_update = pyqtSignal(int, str)
-    file_completed = pyqtSignal(int)
+    progress_update = pyqtSignal(int, str, int)  # Общий процент, текущий файл, процент текущего файла
     compression_finished = pyqtSignal(bool, str, float, float, float)  # Добавлены размеры
 
     def __init__(self, input_folder, output_folder, codec, crf, hw_accel, video_files):
@@ -54,6 +79,7 @@ class FolderCompressionThread(QThread):
         self.hw_accel = hw_accel
         self.video_files = video_files
         self.compressor = VideoCompressor()
+        self.running = True
 
     def run(self):
         try:
@@ -62,7 +88,13 @@ class FolderCompressionThread(QThread):
             total_output_size_mb = 0
             total_files = len(self.video_files)
 
+            # Подсчет общего количества файлов для вычисления прогресса
+            total_processed = 0
+
             for i, video_file in enumerate(self.video_files, 1):
+                if not self.running:
+                    break
+
                 input_size_mb = os.path.getsize(video_file) / (1024 * 1024)
                 total_input_size_mb += input_size_mb
                 base_name, ext = os.path.splitext(os.path.basename(video_file))
@@ -74,24 +106,44 @@ class FolderCompressionThread(QThread):
                     output_ext = ".mp4"
                 output_file = os.path.join(self.output_folder, f"{base_name}_compressed{output_ext}")
 
-                self.progress_update.emit(0, os.path.basename(video_file))
+                # Расчет прогресса: завершенные файлы + прогресс текущего файла
+                def progress_callback(percent):
+                    overall_percent = int((total_processed + percent / 100) / total_files * 100)
+                    self.progress_update.emit(overall_percent, os.path.basename(video_file), percent)
+
+                # Обработка текущего файла
                 self.compressor.compress_video(
                     video_file,
                     output_file,
                     self.codec,
                     self.crf,
                     self.hw_accel,
-                    lambda p: self.progress_update.emit(p, os.path.basename(video_file))
+                    progress_callback
                 )
+
                 output_size_mb = os.path.getsize(output_file) / (1024 * 1024) if os.path.exists(output_file) else 0
                 total_output_size_mb += output_size_mb
-                self.file_completed.emit(i)
 
+                # Увеличиваем счетчик завершенных файлов
+                total_processed += 1
+
+                # Обновляем общий прогресс
+                overall_percent = int(total_processed / total_files * 100)
+                self.progress_update.emit(overall_percent, f"Завершено {i}/{total_files}", 100)
+
+            # Финальное обновление прогресса
+            self.progress_update.emit(overall_percent, f"Завершено {i}/{total_files}", 100)
             elapsed_time = time.time() - start_time
-            self.compression_finished.emit(True, "Сжатие всех видео успешно завершено", elapsed_time, total_input_size_mb, total_output_size_mb)
+            self.compression_finished.emit(True, "Сжатие всех видео успешно завершено", elapsed_time,
+                                           total_input_size_mb, total_output_size_mb)
         except Exception as e:
             elapsed_time = time.time() - start_time if 'start_time' in locals() else 0
             self.compression_finished.emit(False, f"Ошибка при сжатии видео: {str(e)}", elapsed_time, 0, 0)
+
+    def stop(self):
+        """Безопасная остановка процесса сжатия"""
+        self.running = False
+
 
 # Главное окно приложения
 class MainWindow(QMainWindow):
@@ -180,13 +232,21 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         main_layout.addWidget(self.progress_bar)
 
-        # Метки для отображения прогресса
+        # Первая строка статуса: текущий файл и прогресс файла
+        status_row_1 = QHBoxLayout()
         self.current_file_label = QLabel("Текущий файл: N/A")
         self.file_progress_label = QLabel("Прогресс файла: 0%")
+        status_row_1.addWidget(self.current_file_label)
+        status_row_1.addWidget(self.file_progress_label)
+        main_layout.addLayout(status_row_1)
+
+        # Вторая строка статуса: общий прогресс и ETA
+        status_row_2 = QHBoxLayout()
         self.overall_progress_label = QLabel("Общий прогресс: 0/0")
-        main_layout.addWidget(self.current_file_label)
-        main_layout.addWidget(self.file_progress_label)
-        main_layout.addWidget(self.overall_progress_label)
+        self.eta_label = QLabel("Осталось времени: --:--")
+        status_row_2.addWidget(self.overall_progress_label)
+        status_row_2.addWidget(self.eta_label)
+        main_layout.addLayout(status_row_2)
 
         # Кнопка запуска сжатия
         self.compress_button = QPushButton("Сжать видео")
@@ -271,7 +331,7 @@ class MainWindow(QMainWindow):
                 estimated_size = self.compressor.estimate_output_size(self.input_path, codec, crf)
 
             if estimated_size >= 1024:
-                self.size_estimate_label.setText(f"{estimated_size/1024:.2f} ГБ")
+                self.size_estimate_label.setText(f"{estimated_size / 1024:.2f} ГБ")
             else:
                 self.size_estimate_label.setText(f"{estimated_size:.2f} МБ")
         except Exception as e:
@@ -301,6 +361,11 @@ class MainWindow(QMainWindow):
         self.current_file_label.setText("Текущий файл: N/A")
         self.file_progress_label.setText("Прогресс файла: 0%")
         self.overall_progress_label.setText("Общий прогресс: 0/0")
+        self.eta_label.setText("Осталось времени: --:--")
+
+        # Установка начального времени для расчёта ETA
+        self.start_time = time.time()
+        self.last_progress_update = 0
 
         if self.is_folder:
             video_files = self.get_video_files(self.input_path)
@@ -317,8 +382,9 @@ class MainWindow(QMainWindow):
                 hw_accel,
                 video_files
             )
-            self.compression_thread.progress_update.connect(self.update_file_progress)
-            self.compression_thread.file_completed.connect(self.update_overall_progress)
+            self.total_files = len(video_files)
+            self.overall_progress_label.setText(f"Общий прогресс: 0/{self.total_files}")
+            self.compression_thread.progress_update.connect(self.update_folder_progress)
             self.compression_thread.compression_finished.connect(self.compression_completed)
             self.compression_thread.start()
         else:
@@ -347,14 +413,65 @@ class MainWindow(QMainWindow):
         self.file_progress_label.setText(f"Прогресс файла: {value}%")
         self.overall_progress_label.setText("Общий прогресс: 1/1")
 
+        # Расчёт ETA
+        self.update_eta(value)
+
+    def update_eta(self, progress):
+        """Расчёт и обновление оставшегося времени"""
+        if progress <= 0:
+            self.eta_label.setText("Осталось времени: --:--")
+            return
+
+        current_time = time.time()
+        elapsed = current_time - self.start_time
+
+        # Избегаем деления на ноль
+        if progress > 0:
+            total_estimated = elapsed * 100 / progress
+            remaining = total_estimated - elapsed
+
+            # Форматируем оставшееся время
+            if remaining < 60:
+                time_str = f"{int(remaining)} сек."
+            elif remaining < 3600:
+                minutes = int(remaining // 60)
+                seconds = int(remaining % 60)
+                time_str = f"{minutes} мин. {seconds} сек."
+            else:
+                hours = int(remaining // 3600)
+                minutes = int((remaining % 3600) // 60)
+                time_str = f"{hours} ч. {minutes} мин."
+
+            self.eta_label.setText(f"Осталось времени: {time_str}")
+
+            # Сохраняем последнее обновление для оптимизации
+            self.last_progress_update = progress
+
+    def update_folder_progress(self, progress, file_name, file_progress):
+        # Обновляем общий прогресс в прогресс-баре
+        self.progress_bar.setValue(progress)
+        self.current_file_label.setText(f"Текущий файл: {file_name}")
+
+        # Обновляем прогресс текущего файла
+        self.file_progress_label.setText(f"Прогресс файла: {file_progress}%")
+
+        # Расчёт ETA для папки
+        self.update_eta(progress)
+
+        # Если это информация о завершении файла
+        if file_name.startswith("Завершено"):
+            self.overall_progress_label.setText(file_name)
+        else:
+            completed_files = int(progress * self.total_files / 100)
+            self.overall_progress_label.setText(f"Обработано файлов: {completed_files}/{self.total_files}")
+
     def update_file_progress(self, progress, file_name):
         self.progress_bar.setValue(progress)
         self.current_file_label.setText(f"Текущий файл: {file_name}")
         self.file_progress_label.setText(f"Прогресс файла: {progress}%")
 
-    def update_overall_progress(self, completed):
-        total = len(self.get_video_files(self.input_path))
-        self.overall_progress_label.setText(f"Общий прогресс: {completed}/{total}")
+        # Расчёт ETA для папки
+        self.update_eta(progress)
 
     def compression_completed(self, success, message, elapsed_time, input_size_mb, output_size_mb):
         self.compress_button.setEnabled(True)
@@ -373,3 +490,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Успех", result_message)
         else:
             QMessageBox.critical(self, "Ошибка", result_message)
+
+    def closeEvent(self, event):
+        """Обработка закрытия окна"""
+        if self.compression_thread and self.compression_thread.isRunning():
+            self.compression_thread.stop()
+        event.accept()
