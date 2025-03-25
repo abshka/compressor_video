@@ -1,0 +1,14 @@
+[project]
+name = "compressorvideo"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pip==25.0.1",
+    "pyqt5==5.15.11",
+    "pyqt5-qt5==5.15.16",
+    "pyqt5-sip==12.17.0",
+    "setuptools==78.0.1",
+    "tk>=0.1.0",
+]

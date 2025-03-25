@@ -1,0 +1,6 @@
+PyQt5==5.15.9
+pip==25.0.1
+pyqt5==5.15.11
+pyqt5-qt5==5.15.16
+pyqt5-sip==12.17.0
+setuptools==78.0.1
