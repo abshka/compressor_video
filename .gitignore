@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 .idea/
+.ropeproject/
 
 # Virtual environments
 .venv
