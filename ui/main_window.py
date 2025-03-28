@@ -1,11 +1,23 @@
 import os
 import subprocess
 import time
-import signal
-from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QPushButton,
-                             QHBoxLayout, QLabel, QFileDialog, QComboBox,
-                             QSlider, QProgressBar, QMessageBox, QGroupBox)
+
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
+
 from video_compressor.compressor import VideoCompressor
 
 
@@ -34,16 +46,22 @@ class CompressionThread(QThread):
                 self.codec,
                 self.crf,
                 self.hw_accel,
-                self.progress_update.emit
+                self.progress_update.emit,
             )
             elapsed_time = time.time() - start_time
-            output_size_mb = os.path.getsize(self.output_file) / (1024 * 1024) if os.path.exists(
-                self.output_file) else 0
-            self.compression_finished.emit(True, "Сжатие видео успешно завершено", elapsed_time, input_size_mb,
-                                           output_size_mb)
+            output_size_mb = (
+                os.path.getsize(self.output_file) / (1024 * 1024)
+                if os.path.exists(self.output_file)
+                else 0
+            )
+            self.compression_finished.emit(
+                True, "Сжатие видео успешно завершено", elapsed_time, input_size_mb, output_size_mb
+            )
         except Exception as e:
-            elapsed_time = time.time() - start_time if 'start_time' in locals() else 0
-            self.compression_finished.emit(False, f"Ошибка при сжатии видео: {str(e)}", elapsed_time, 0, 0)
+            elapsed_time = time.time() - start_time if "start_time" in locals() else 0
+            self.compression_finished.emit(
+                False, f"Ошибка при сжатии видео: {str(e)}", elapsed_time, 0, 0
+            )
         finally:
             if self.process and self.process.poll() is None:
                 self.process.terminate()
@@ -67,7 +85,9 @@ class CompressionThread(QThread):
 
 # Поток для сжатия папки
 class FolderCompressionThread(QThread):
-    progress_update = pyqtSignal(int, str, int)  # Общий процент, текущий файл, процент текущего файла
+    progress_update = pyqtSignal(
+        int, str, int
+    )  # Общий процент, текущий файл, процент текущего файла
     compression_finished = pyqtSignal(bool, str, float, float, float)  # Добавлены размеры
 
     def __init__(self, input_folder, output_folder, codec, crf, hw_accel, video_files):
@@ -104,24 +124,27 @@ class FolderCompressionThread(QThread):
                     output_ext = ".mkv"
                 else:
                     output_ext = ".mp4"
-                output_file = os.path.join(self.output_folder, f"{base_name}_compressed{output_ext}")
+                output_file = os.path.join(
+                    self.output_folder, f"{base_name}_compressed{output_ext}"
+                )
 
                 # Расчет прогресса: завершенные файлы + прогресс текущего файла
                 def progress_callback(percent):
                     overall_percent = int((total_processed + percent / 100) / total_files * 100)
-                    self.progress_update.emit(overall_percent, os.path.basename(video_file), percent)
+                    self.progress_update.emit(
+                        overall_percent, os.path.basename(video_file), percent
+                    )
 
                 # Обработка текущего файла
                 self.compressor.compress_video(
-                    video_file,
-                    output_file,
-                    self.codec,
-                    self.crf,
-                    self.hw_accel,
-                    progress_callback
+                    video_file, output_file, self.codec, self.crf, self.hw_accel, progress_callback
                 )
 
-                output_size_mb = os.path.getsize(output_file) / (1024 * 1024) if os.path.exists(output_file) else 0
+                output_size_mb = (
+                    os.path.getsize(output_file) / (1024 * 1024)
+                    if os.path.exists(output_file)
+                    else 0
+                )
                 total_output_size_mb += output_size_mb
 
                 # Увеличиваем счетчик завершенных файлов
@@ -134,11 +157,18 @@ class FolderCompressionThread(QThread):
             # Финальное обновление прогресса
             self.progress_update.emit(overall_percent, f"Завершено {i}/{total_files}", 100)
             elapsed_time = time.time() - start_time
-            self.compression_finished.emit(True, "Сжатие всех видео успешно завершено", elapsed_time,
-                                           total_input_size_mb, total_output_size_mb)
+            self.compression_finished.emit(
+                True,
+                "Сжатие всех видео успешно завершено",
+                elapsed_time,
+                total_input_size_mb,
+                total_output_size_mb,
+            )
         except Exception as e:
-            elapsed_time = time.time() - start_time if 'start_time' in locals() else 0
-            self.compression_finished.emit(False, f"Ошибка при сжатии видео: {str(e)}", elapsed_time, 0, 0)
+            elapsed_time = time.time() - start_time if "start_time" in locals() else 0
+            self.compression_finished.emit(
+                False, f"Ошибка при сжатии видео: {str(e)}", elapsed_time, 0, 0
+            )
 
     def stop(self):
         """Безопасная остановка процесса сжатия"""
@@ -266,7 +296,7 @@ class MainWindow(QMainWindow):
             self,
             "Выберите видео для сжатия",
             "",
-            "Видео файлы (*.mp4 *.mkv *.avi *.mov *.wmv *.webm);;Все файлы (*)"
+            "Видео файлы (*.mp4 *.mkv *.avi *.mov *.wmv *.webm);;Все файлы (*)",
         )
         if file_path:
             self.input_path = file_path
@@ -276,24 +306,20 @@ class MainWindow(QMainWindow):
             self.update_size_estimate()
 
     def select_input_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(
-            self,
-            "Выберите папку с видео",
-            ""
-        )
+        folder_path = QFileDialog.getExistingDirectory(self, "Выберите папку с видео", "")
         if folder_path:
             self.input_path = folder_path
             self.is_folder = True
             video_files = self.get_video_files(folder_path)
-            self.input_label.setText(f"Входная папка: {os.path.basename(folder_path)} ({len(video_files)} видео)")
+            self.input_label.setText(
+                f"Входная папка: {os.path.basename(folder_path)} ({len(video_files)} видео)"
+            )
             self.update_compress_button()
             self.update_size_estimate()
 
     def select_output_folder(self):
         folder_path = QFileDialog.getExistingDirectory(
-            self,
-            "Выберите папку для сохранения сжатых видео",
-            ""
+            self, "Выберите папку для сохранения сжатых видео", ""
         )
         if folder_path:
             self.output_folder = folder_path
@@ -301,10 +327,13 @@ class MainWindow(QMainWindow):
             self.update_compress_button()
 
     def get_video_files(self, folder_path):
-        video_extensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.webm']
+        video_extensions = [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm"]
         files = []
         for file in os.listdir(folder_path):
-            if any(file.lower().endswith(ext) for ext in video_extensions) and 'compressed' not in file.lower():
+            if (
+                any(file.lower().endswith(ext) for ext in video_extensions)
+                and "compressed" not in file.lower()
+            ):
                 files.append(os.path.join(folder_path, file))
         return files
 
@@ -340,7 +369,9 @@ class MainWindow(QMainWindow):
 
     def compress_video(self):
         if not (self.input_path and self.output_folder):
-            QMessageBox.warning(self, "Предупреждение", "Выберите входной файл/папку и выходную папку")
+            QMessageBox.warning(
+                self, "Предупреждение", "Выберите входной файл/папку и выходную папку"
+            )
             return
 
         codec = self.codec_combo.currentText().split(" ")[0].lower()
@@ -375,12 +406,7 @@ class MainWindow(QMainWindow):
                 return
 
             self.compression_thread = FolderCompressionThread(
-                self.input_path,
-                self.output_folder,
-                codec,
-                crf,
-                hw_accel,
-                video_files
+                self.input_path, self.output_folder, codec, crf, hw_accel, video_files
             )
             self.total_files = len(video_files)
             self.overall_progress_label.setText(f"Общий прогресс: 0/{self.total_files}")
@@ -397,11 +423,7 @@ class MainWindow(QMainWindow):
                 output_ext = ".mp4"
             output_file = os.path.join(self.output_folder, f"{base_name}_compressed{output_ext}")
             self.compression_thread = CompressionThread(
-                self.input_path,
-                output_file,
-                codec,
-                crf,
-                hw_accel
+                self.input_path, output_file, codec, crf, hw_accel
             )
             self.compression_thread.progress_update.connect(self.update_progress)
             self.compression_thread.compression_finished.connect(self.compression_completed)
@@ -463,7 +485,9 @@ class MainWindow(QMainWindow):
             self.overall_progress_label.setText(file_name)
         else:
             completed_files = int(progress * self.total_files / 100)
-            self.overall_progress_label.setText(f"Обработано файлов: {completed_files}/{self.total_files}")
+            self.overall_progress_label.setText(
+                f"Обработано файлов: {completed_files}/{self.total_files}"
+            )
 
     def update_file_progress(self, progress, file_name):
         self.progress_bar.setValue(progress)
